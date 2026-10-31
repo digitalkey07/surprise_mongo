@@ -2,7 +2,17 @@
 import json
 import re
 
-from flask import Blueprint, render_template, request, jsonify
+from datetime import datetime, timezone
+
+from flask import (
+    Blueprint,
+    render_template,
+    request,
+    jsonify
+)
+
+from bson import ObjectId
+from pymongo.errors import PyMongoError
 
 from database import get_db
 from utils.validator import validate_token
@@ -13,11 +23,52 @@ admin_bp = Blueprint("admin", __name__)
 
 
 # ============================================================
+# COMMON HELPERS
+# ============================================================
+
+def serialize_document(document):
+    """MongoDB ObjectId ko JSON-compatible string mein convert karo."""
+
+    if document is None:
+        return None
+
+    document = dict(document)
+
+    if "_id" in document:
+        document["id"] = str(document.pop("_id"))
+
+    # User ID ko bhi string mein convert karo
+    if isinstance(document.get("user_id"), ObjectId):
+        document["user_id"] = str(document["user_id"])
+
+    return document
+
+
+def get_object_id(value):
+    """Valid MongoDB ObjectId return karo."""
+
+    if not isinstance(value, str) or not ObjectId.is_valid(value):
+        return None
+
+    return ObjectId(value)
+
+
+def current_timestamp():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def get_request_data():
+    data = request.get_json(silent=True)
+    return data if isinstance(data, dict) else {}
+
+
+# ============================================================
 # ADMIN AUTHENTICATION
 # ============================================================
 
 def get_admin_from_token():
-    data = request.get_json(silent=True) or {}
+
+    data = get_request_data()
     token = data.get("token")
 
     if not token:
@@ -31,7 +82,7 @@ def get_admin_from_token():
 
     token_data = validate_token(token)
 
-    if not token_data or not token_data.get("user_id"):
+    if not token_data:
         return None, (
             jsonify({
                 "status": "error",
@@ -40,56 +91,128 @@ def get_admin_from_token():
             401
         )
 
-    with get_db() as conn:
-        admin = conn.execute(
-            """
-            SELECT id, username, user_type
-            FROM users
-            WHERE id = ? AND user_type = ?
-            """,
-            (token_data["user_id"], USER_TYPE)
-        ).fetchone()
+    # New token structure:
+    # {"user_id": "MongoDB ObjectId"}
 
-    if not admin:
+    user_id = token_data.get("user_id")
+
+    object_id = get_object_id(user_id)
+
+    if object_id is None:
         return None, (
             jsonify({
                 "status": "error",
-                "error": "Admin access required."
+                "error": "Invalid or expired token."
             }),
-            403
+            401
         )
 
-    return dict(admin), None
+    try:
+
+        db = get_db()
+
+        admin = db.users.find_one(
+            {
+                "_id": object_id,
+                "user_type": USER_TYPE,
+                "is_verify": True
+            },
+            {
+                "username": 1,
+                "user_type": 1,
+                "is_verify": 1
+            }
+        )
+
+        if not admin:
+            return None, (
+                jsonify({
+                    "status": "error",
+                    "error": "Admin access required."
+                }),
+                403
+            )
+
+        return serialize_document(admin), None
+
+    except PyMongoError as e:
+
+        print("Admin authentication error:", e)
+
+        return None, (
+            jsonify({
+                "status": "error",
+                "error": "Database error."
+            }),
+            500
+        )
 
 
 # ============================================================
-# COMMON HELPERS
+# VISITOR HELPERS
 # ============================================================
 
-def visitor_select_sql():
-    return """
-        SELECT
-            v.id,
-            v.ip_address,
-            v.user_agent,
-            v.page_path,
-            v.visited_at,
-            v.device_type,
-            v.browser,
-            v.operating_system,
-            v.latitude,
-            v.longitude,
-            v.accuracy,
-            v.share_id,
-            v.mac_address,
-            u.username AS referrer_username
-        FROM visitor_logs AS v
-        LEFT JOIN users AS u
-            ON u.shared_id = v.share_id
-    """
+def prepare_visitors(db, query=None, limit=200):
 
+    if query is None:
+        query = {}
+
+    visitors = list(
+        db.visitor_logs.find(query)
+        .sort("_id", -1)
+        .limit(limit)
+    )
+
+    # Visitor records se user IDs collect karo
+    user_ids = list({
+        visitor.get("user_id")
+        for visitor in visitors
+        if isinstance(visitor.get("user_id"), ObjectId)
+    })
+
+    users_map = {}
+
+    # Ek baar mein sabhi users search karo
+    if user_ids:
+
+        owners = db.users.find(
+            {
+                "_id": {
+                    "$in": user_ids
+                }
+            },
+            {
+                "username": 1
+            }
+        )
+
+        users_map = {
+            owner["_id"]: owner["username"]
+            for owner in owners
+        }
+
+    result = []
+
+    for visitor in visitors:
+
+        # Serialize karne se pehle original user_id save karo
+        user_id = visitor.get("user_id")
+
+        visitor = serialize_document(visitor)
+
+        visitor["referrer_username"] = users_map.get(user_id)
+
+        result.append(visitor)
+
+    return result
+
+
+# ============================================================
+# COLOR VALIDATION
+# ============================================================
 
 def validate_color(value, default):
+
     if value is None or value == "":
         return default
 
@@ -106,7 +229,12 @@ def validate_color(value, default):
     return value
 
 
+# ============================================================
+# FESTIVAL DATA PREPARATION
+# ============================================================
+
 def prepare_festival_data(data):
+
     festival_name = data.get("festival_name")
     title = data.get("title")
 
@@ -142,6 +270,7 @@ def prepare_festival_data(data):
     }
 
     for field in text_fields:
+
         value = data.get(field, "")
 
         if value is None:
@@ -152,12 +281,15 @@ def prepare_festival_data(data):
 
         result[field] = value.strip()
 
-    # Wishes must be a JSON array of strings.
+    # Wishes JSON array validation
+
     wishes = data.get("wishes", [])
 
     if isinstance(wishes, str):
+
         try:
             wishes = json.loads(wishes)
+
         except json.JSONDecodeError:
             raise ValueError("Wishes must be a valid JSON array.")
 
@@ -167,6 +299,7 @@ def prepare_festival_data(data):
     if not all(isinstance(item, str) for item in wishes):
         raise ValueError("Every wish must be text.")
 
+    # Frontend compatibility ke liye JSON string store kar rahe hain
     result["wishes"] = json.dumps(
         wishes,
         ensure_ascii=False
@@ -197,7 +330,14 @@ def prepare_festival_data(data):
     if isinstance(is_active, bool):
         is_active = int(is_active)
 
-    if is_active not in (0, 1):
+    if isinstance(is_active, str) and is_active in ("0", "1"):
+        is_active = int(is_active)
+
+    if (
+        isinstance(is_active, bool)
+        or not isinstance(is_active, int)
+        or is_active not in (0, 1)
+    ):
         raise ValueError("is_active must be 0 or 1.")
 
     result["is_active"] = is_active
@@ -205,17 +345,17 @@ def prepare_festival_data(data):
     return result
 
 
-def get_festival_by_id(conn, festival_id):
-    row = conn.execute(
-        """
-        SELECT *
-        FROM uidata
-        WHERE id = ?
-        """,
-        (festival_id,)
-    ).fetchone()
+# ============================================================
+# GET FESTIVAL BY ID
+# ============================================================
 
-    return dict(row) if row else None
+def get_festival_by_id(db, festival_id):
+
+    festival = db.uidata.find_one({
+        "_id": festival_id
+    })
+
+    return serialize_document(festival)
 
 
 # ============================================================
@@ -224,6 +364,7 @@ def get_festival_by_id(conn, festival_id):
 
 @admin_bp.route("/admin", methods=["GET"])
 def admin():
+
     return render_template("admin.html")
 
 
@@ -233,52 +374,62 @@ def admin():
 
 @admin_bp.route("/admin/dashboard", methods=["POST"])
 def admin_dashboard():
+
     admin_user, error = get_admin_from_token()
 
     if error:
         return error
 
-    with get_db() as conn:
-        total_visitors = conn.execute(
-            "SELECT COUNT(*) FROM visitor_logs"
-        ).fetchone()[0]
+    try:
 
-        total_users = conn.execute(
-            "SELECT COUNT(*) FROM users WHERE user_type = 'user'"
-        ).fetchone()[0]
+        db = get_db()
 
-        total_admins = conn.execute(
-            "SELECT COUNT(*) FROM users WHERE user_type = ?",
-            (USER_TYPE,)
-        ).fetchone()[0]
+        total_visitors = db.visitor_logs.count_documents({})
 
-        total_festivals = conn.execute(
-            "SELECT COUNT(*) FROM uidata"
-        ).fetchone()[0]
+        total_users = db.users.count_documents({
+            "user_type": "user"
+        })
 
-        active_festivals = conn.execute(
-            "SELECT COUNT(*) FROM uidata WHERE is_active = 1"
-        ).fetchone()[0]
+        total_admins = db.users.count_documents({
+            "user_type": USER_TYPE
+        })
 
-        latest_visitors = conn.execute(
-            visitor_select_sql()
-            + " ORDER BY v.id DESC LIMIT 10"
-        ).fetchall()
+        total_festivals = db.uidata.count_documents({})
 
-    return jsonify({
-        "status": "success",
-        "admin": admin_user,
-        "statistics": {
-            "total_visitors": total_visitors,
-            "total_users": total_users,
-            "total_admins": total_admins,
-            "total_festivals": total_festivals,
-            "active_festivals": active_festivals
-        },
-        "latest_visitors": [
-            dict(row) for row in latest_visitors
-        ]
-    })
+        active_festivals = db.uidata.count_documents({
+            "is_active": 1
+        })
+
+        latest_visitors = prepare_visitors(
+            db,
+            limit=10
+        )
+
+        return jsonify({
+            "status": "success",
+
+            "admin": admin_user,
+
+            "statistics": {
+                "total_visitors": total_visitors,
+                "total_users": total_users,
+                "total_admins": total_admins,
+                "total_festivals": total_festivals,
+                "active_festivals": active_festivals
+            },
+
+            "latest_visitors": latest_visitors
+
+        }), 200
+
+    except PyMongoError as e:
+
+        print("Dashboard error:", e)
+
+        return jsonify({
+            "status": "error",
+            "error": "Database error."
+        }), 500
 
 
 # ============================================================
@@ -287,24 +438,45 @@ def admin_dashboard():
 
 @admin_bp.route("/admin/users", methods=["POST"])
 def admin_users():
+
     admin_user, error = get_admin_from_token()
 
     if error:
         return error
 
-    with get_db() as conn:
-        users = conn.execute(
-            """
-            SELECT id, username, user_type, shared_id
-            FROM users
-            ORDER BY id DESC
-            """
-        ).fetchall()
+    try:
 
-    return jsonify({
-        "status": "success",
-        "users": [dict(row) for row in users]
-    })
+        db = get_db()
+
+        users = list(
+            db.users.find(
+                {},
+                {
+                    "username": 1,
+                    "user_type": 1,
+                    "is_verify": 1
+                }
+            ).sort("_id", -1)
+        )
+
+        return jsonify({
+            "status": "success",
+
+            "users": [
+                serialize_document(user)
+                for user in users
+            ]
+
+        }), 200
+
+    except PyMongoError as e:
+
+        print("Users list error:", e)
+
+        return jsonify({
+            "status": "error",
+            "error": "Database error."
+        }), 500
 
 
 # ============================================================
@@ -313,21 +485,34 @@ def admin_users():
 
 @admin_bp.route("/admin/visitors", methods=["POST"])
 def admin_visitors():
+
     admin_user, error = get_admin_from_token()
 
     if error:
         return error
 
-    with get_db() as conn:
-        visitors = conn.execute(
-            visitor_select_sql()
-            + " ORDER BY v.id DESC LIMIT 200"
-        ).fetchall()
+    try:
 
-    return jsonify({
-        "status": "success",
-        "visitors": [dict(row) for row in visitors]
-    })
+        db = get_db()
+
+        visitors = prepare_visitors(
+            db,
+            limit=200
+        )
+
+        return jsonify({
+            "status": "success",
+            "visitors": visitors
+        }), 200
+
+    except PyMongoError as e:
+
+        print("Visitors list error:", e)
+
+        return jsonify({
+            "status": "error",
+            "error": "Database error."
+        }), 500
 
 
 # ============================================================
@@ -335,50 +520,75 @@ def admin_visitors():
 # ============================================================
 
 @admin_bp.route(
-    "/admin/users/<int:user_id>/visitors",
+    "/admin/users/<string:user_id>/visitors",
     methods=["POST"]
 )
 def admin_user_visitors(user_id):
+
     admin_user, error = get_admin_from_token()
 
     if error:
         return error
 
-    with get_db() as conn:
-        user = conn.execute(
-            """
-            SELECT id, username, shared_id
-            FROM users
-            WHERE id = ?
-            """,
-            (user_id,)
-        ).fetchone()
+    object_id = get_object_id(user_id)
+
+    if object_id is None:
+        return jsonify({
+            "status": "error",
+            "error": "Invalid user ID."
+        }), 400
+
+    try:
+
+        db = get_db()
+
+        user = db.users.find_one(
+            {
+                "_id": object_id
+            },
+            {
+                "username": 1,
+                "user_type": 1
+            }
+        )
 
         if not user:
+
             return jsonify({
                 "status": "error",
                 "error": "User not found."
             }), 404
 
-        visitors = conn.execute(
-            visitor_select_sql()
-            + """
-            WHERE v.share_id = ?
-            ORDER BY v.id DESC
-            LIMIT 200
-            """,
-            (user["shared_id"],)
-        ).fetchall()
+        visitors = prepare_visitors(
+            db,
+            query={
+                "user_id": object_id
+            },
+            limit=200
+        )
 
-    return jsonify({
-        "status": "success",
-        "user": dict(user),
-        "visitors": [dict(row) for row in visitors]
-    })
+        return jsonify({
+            "status": "success",
+
+            "user": serialize_document(user),
+
+            "visitors": visitors
+
+        }), 200
+
+    except PyMongoError as e:
+
+        print("User visitors error:", e)
+
+        return jsonify({
+            "status": "error",
+            "error": "Database error."
+        }), 500
 
 
 # ============================================================
 # FESTIVAL MANAGEMENT
+#
 # POST /admin/festivals
 #
 # action=list
@@ -388,177 +598,150 @@ def admin_user_visitors(user_id):
 
 @admin_bp.route("/admin/festivals", methods=["POST"])
 def admin_festivals():
+
     admin_user, error = get_admin_from_token()
 
     if error:
         return error
 
-    data = request.get_json(silent=True) or {}
+    data = get_request_data()
+
     action = data.get("action")
 
-    # --------------------------------------------------------
-    # LIST FESTIVALS
-    # --------------------------------------------------------
+    try:
 
-    if action == "list":
-        with get_db() as conn:
-            festivals = conn.execute(
-                """
-                SELECT *
-                FROM uidata
-                ORDER BY id DESC
-                """
-            ).fetchall()
+        db = get_db()
 
-        return jsonify({
-            "status": "success",
-            "festivals": [dict(row) for row in festivals]
-        })
+        # ----------------------------------------------------
+        # LIST FESTIVALS
+        # ----------------------------------------------------
 
-    # --------------------------------------------------------
-    # CREATE FESTIVAL
-    # --------------------------------------------------------
+        if action == "list":
 
-    if action == "create":
-        try:
-            festival = prepare_festival_data(data)
-        except ValueError as exc:
-            return jsonify({
-                "status": "error",
-                "error": str(exc)
-            }), 400
-
-        with get_db() as conn:
-            cursor = conn.execute(
-                """
-                INSERT INTO uidata (
-                    festival_name,
-                    title,
-                    subtitle,
-                    eyebrow,
-                    message,
-                    image_path,
-                    download_text,
-                    download_button_text,
-                    surprise_button_text,
-                    wishes,
-                    footer_text,
-                    background_color,
-                    card_color,
-                    text_color,
-                    theme_color,
-                    is_active
-                )
-                VALUES (
-                    :festival_name,
-                    :title,
-                    :subtitle,
-                    :eyebrow,
-                    :message,
-                    :image_path,
-                    :download_text,
-                    :download_button_text,
-                    :surprise_button_text,
-                    :wishes,
-                    :footer_text,
-                    :background_color,
-                    :card_color,
-                    :text_color,
-                    :theme_color,
-                    :is_active
-                )
-                """,
-                festival
+            festivals = list(
+                db.uidata.find({}).sort("_id", -1)
             )
 
-            festival_id = cursor.lastrowid
-            created = get_festival_by_id(conn, festival_id)
-
-        return jsonify({
-            "status": "success",
-            "message": "Festival created successfully.",
-            "festival": created
-        }), 201
-
-    # --------------------------------------------------------
-    # UPDATE FESTIVAL
-    # --------------------------------------------------------
-
-    if action == "update":
-        festival_id = data.get("id")
-
-        if (
-            isinstance(festival_id, bool)
-            or not isinstance(festival_id, int)
-            or festival_id < 1
-        ):
             return jsonify({
-                "status": "error",
-                "error": "A valid festival ID is required."
-            }), 400
+                "status": "success",
 
-        try:
-            festival = prepare_festival_data(data)
-        except ValueError as exc:
+                "festivals": [
+                    serialize_document(festival)
+                    for festival in festivals
+                ]
+
+            }), 200
+
+        # ----------------------------------------------------
+        # CREATE FESTIVAL
+        # ----------------------------------------------------
+
+        if action == "create":
+
+            try:
+                festival = prepare_festival_data(data)
+
+            except ValueError as exc:
+
+                return jsonify({
+                    "status": "error",
+                    "error": str(exc)
+                }), 400
+
+            timestamp = current_timestamp()
+
+            festival["created_at"] = timestamp
+            festival["updated_at"] = timestamp
+
+            result = db.uidata.insert_one(festival)
+
+            created = get_festival_by_id(
+                db,
+                result.inserted_id
+            )
+
             return jsonify({
-                "status": "error",
-                "error": str(exc)
-            }), 400
+                "status": "success",
+                "message": "Festival created successfully.",
+                "festival": created
+            }), 201
 
-        with get_db() as conn:
-            existing = conn.execute(
-                "SELECT id FROM uidata WHERE id = ?",
-                (festival_id,)
-            ).fetchone()
+        # ----------------------------------------------------
+        # UPDATE FESTIVAL
+        # ----------------------------------------------------
+
+        if action == "update":
+
+            festival_id = get_object_id(data.get("id"))
+
+            if festival_id is None:
+
+                return jsonify({
+                    "status": "error",
+                    "error": "A valid festival ID is required."
+                }), 400
+
+            try:
+                festival = prepare_festival_data(data)
+
+            except ValueError as exc:
+
+                return jsonify({
+                    "status": "error",
+                    "error": str(exc)
+                }), 400
+
+            existing = db.uidata.find_one({
+                "_id": festival_id
+            })
 
             if not existing:
+
                 return jsonify({
                     "status": "error",
                     "error": "Festival not found."
                 }), 404
 
-            conn.execute(
-                """
-                UPDATE uidata
-                SET
-                    festival_name = :festival_name,
-                    title = :title,
-                    subtitle = :subtitle,
-                    eyebrow = :eyebrow,
-                    message = :message,
-                    image_path = :image_path,
-                    download_text = :download_text,
-                    download_button_text = :download_button_text,
-                    surprise_button_text = :surprise_button_text,
-                    wishes = :wishes,
-                    footer_text = :footer_text,
-                    background_color = :background_color,
-                    card_color = :card_color,
-                    text_color = :text_color,
-                    theme_color = :theme_color,
-                    is_active = :is_active,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = :id
-                """,
-                {**festival, "id": festival_id}
+            festival["updated_at"] = current_timestamp()
+
+            db.uidata.update_one(
+                {
+                    "_id": festival_id
+                },
+                {
+                    "$set": festival
+                }
             )
 
-            updated = get_festival_by_id(conn, festival_id)
+            updated = get_festival_by_id(
+                db,
+                festival_id
+            )
+
+            return jsonify({
+                "status": "success",
+                "message": "Festival updated successfully.",
+                "festival": updated
+            }), 200
 
         return jsonify({
-            "status": "success",
-            "message": "Festival updated successfully.",
-            "festival": updated
-        })
+            "status": "error",
+            "error": "Invalid action."
+        }), 400
 
-    return jsonify({
-        "status": "error",
-        "error": "Invalid action."
-    }), 400
+    except PyMongoError as e:
+
+        print("Festival management error:", e)
+
+        return jsonify({
+            "status": "error",
+            "error": "Database error. Please try again."
+        }), 500
 
 
 # ============================================================
 # TOGGLE FESTIVAL / DELETE FESTIVAL
+#
 # POST /admin/festivals/<festival_id>
 #
 # action=toggle
@@ -566,25 +749,39 @@ def admin_festivals():
 # ============================================================
 
 @admin_bp.route(
-    "/admin/festivals/<int:festival_id>",
+    "/admin/festivals/<string:festival_id>",
     methods=["POST"]
 )
 def admin_festival_action(festival_id):
+
     admin_user, error = get_admin_from_token()
 
     if error:
         return error
 
-    data = request.get_json(silent=True) or {}
+    object_id = get_object_id(festival_id)
+
+    if object_id is None:
+
+        return jsonify({
+            "status": "error",
+            "error": "Invalid festival ID."
+        }), 400
+
+    data = get_request_data()
+
     action = data.get("action")
 
-    with get_db() as conn:
-        existing = conn.execute(
-            "SELECT id FROM uidata WHERE id = ?",
-            (festival_id,)
-        ).fetchone()
+    try:
+
+        db = get_db()
+
+        existing = db.uidata.find_one({
+            "_id": object_id
+        })
 
         if not existing:
+
             return jsonify({
                 "status": "error",
                 "error": "Festival not found."
@@ -595,56 +792,81 @@ def admin_festival_action(festival_id):
         # ----------------------------------------------------
 
         if action == "toggle":
+
             is_active = data.get("is_active")
 
             if isinstance(is_active, bool):
                 is_active = int(is_active)
 
-            if is_active not in (0, 1):
+            if isinstance(is_active, str) and is_active in ("0", "1"):
+                is_active = int(is_active)
+
+            if (
+                isinstance(is_active, bool)
+                or not isinstance(is_active, int)
+                or is_active not in (0, 1)
+            ):
+
                 return jsonify({
                     "status": "error",
                     "error": "is_active must be 0 or 1."
                 }), 400
 
-            conn.execute(
-                """
-                UPDATE uidata
-                SET
-                    is_active = ?,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                """,
-                (is_active, festival_id)
+            db.uidata.update_one(
+                {
+                    "_id": object_id
+                },
+                {
+                    "$set": {
+                        "is_active": is_active,
+                        "updated_at": current_timestamp()
+                    }
+                }
             )
 
-            festival = get_festival_by_id(conn, festival_id)
+            festival = get_festival_by_id(
+                db,
+                object_id
+            )
 
             return jsonify({
                 "status": "success",
+
                 "message": (
                     "Festival activated successfully."
                     if is_active
                     else "Festival deactivated successfully."
                 ),
+
                 "festival": festival
-            })
+
+            }), 200
 
         # ----------------------------------------------------
         # DELETE FESTIVAL
         # ----------------------------------------------------
 
         if action == "delete":
-            conn.execute(
-                "DELETE FROM uidata WHERE id = ?",
-                (festival_id,)
-            )
+
+            db.uidata.delete_one({
+                "_id": object_id
+            })
 
             return jsonify({
                 "status": "success",
                 "message": "Festival deleted successfully."
-            })
+            }), 200
 
-    return jsonify({
-        "status": "error",
-        "error": "Invalid action."
-    }), 400
+        return jsonify({
+            "status": "error",
+            "error": "Invalid action."
+        }), 400
+
+    except PyMongoError as e:
+
+        print("Festival action error:", e)
+
+        return jsonify({
+            "status": "error",
+            "error": "Database error. Please try again."
+        }), 500

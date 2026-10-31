@@ -1,141 +1,102 @@
-from genericpath import isfile
-import os
-import sqlite3
-from config import DATABASE_NAME
+
+from email.policy import default
+from enum import unique
+
+from pymongo import MongoClient,ASCENDING
+from pymongo.errors import PyMongoError
+import certifi
 
 
-DATABASE = os.path.join(
-    os.environ.get("DATA_DIR", "."),
-    DATABASE_NAME
-)
-# if os.path.isfile(DATABASE):
-#     os.remove(DATABASE)
-os.makedirs(os.path.dirname(DATABASE) or ".", exist_ok=True)
-
-#======================================
-#DATABASE CONNECTION FUNCTION
-#======================================
+from config import MONGO_URI,MONGO_DB_NAME
+# ======================================
+# MONGODB CONNECTION
+# ======================================
+client = MongoClient(
+    MONGO_URI,
+    tls=True,
+    tlsCAFile=certifi.where(),
+    serverSelectionTimeoutMS=5000,
+    connectTimeoutMS=10000
+    )
+db = client[MONGO_DB_NAME]
+# ======================================
+# DATABASE CONNECTION FUNCTION
+# ======================================
 def get_db():
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return db
 
-#======================================
-#DATABASE TABLE CREATION FUNCTION
-#======================================
-def create_table():
-    with get_db() as conn:
+# ======================================
+# COLLECTION REFERENCES
+# ======================================
 
-        # Visitor tracking table
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS visitor_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ip_address TEXT,
-                user_agent TEXT,
-                page_path TEXT,
-                visited_at TEXT,
-                visitor_token TEXT UNIQUE,
-                device_type TEXT,
-                browser TEXT,
-                operating_system TEXT,
-                latitude REAL,
-                longitude REAL,
-                accuracy REAL,
-                share_id TEXT,
-                mac_address TEXT
-            )
-        """)
+visitor_logs = db["visitor_logs"]
+users = db["users"]
+uidata = db["uidata"]
 
-        # Users / Admin login table
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT UNIQUE NOT NULL,
-                password TEXT NOT NULL,
-                user_type TEXT NOT NULL DEFAULT 'user',
-                shared_id TEXT NOT NULL UNIQUE
-            )
-        """)   
+
+# ======================================
+# DATABASE CONNECTION CHECK
+# ======================================
+def check_database():
+    try:
+        client.admin.command("ping")
+        print("MongoDb connection Succssfully")
+        return True
+    except PyMongoError as e:
+        print("MongoDb connection failed")
+        print("Error: " , repr(e))
+        return False
         
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS uidata (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+# ======================================
+# DATABASE INDEX CREATION
+# ======================================
+def create_table():
+    visitor_logs.create_index(
+        [("ip_address", ASCENDING)]
+    )
 
-                festival_name TEXT NOT NULL,
-                title TEXT NOT NULL,
-                subtitle TEXT,
+    visitor_logs.create_index(
+        [("visited_at", ASCENDING)]
+    )
+    visitor_logs.create_index(
+    [("user_id", ASCENDING)]
+    )
 
-                eyebrow TEXT,
-                message TEXT,
-                image_path TEXT,
+    # Users indexes
+    users.create_index(
+        [("username", ASCENDING)],
+        unique=True
+    )
+  
+    users.create_index(
+        [("is_verify",ASCENDING)]
+    )
 
-                download_text TEXT,
-                download_button_text TEXT,
+    # UI data indexes
+    uidata.create_index(
+        [("festival_name", ASCENDING)]
+    )
 
-                surprise_button_text TEXT,
-                wishes TEXT,
+    uidata.create_index(
+        [("is_active", ASCENDING)]
+    )
 
-                footer_text TEXT,
+    print("MongoDB indexes created successfully")
 
-                background_color TEXT DEFAULT '#fff4f7',
-                card_color TEXT DEFAULT '#ffffff',
-                text_color TEXT DEFAULT '#333333',
-                theme_color TEXT DEFAULT '#b83280',
+# ======================================
+# DATABASE INITIALIZATION
+# ======================================
 
-                is_active INTEGER NOT NULL DEFAULT 1,
+def init_database():
 
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+    if check_database():
+        create_table()
+        print("Database initialized successfully")
 
 
-#======================================
-#DATABASE MIGRATION FUNCTION
-#======================================
-def migrate_database():
-    with get_db() as conn:
-        existing_visitor_logs = {
-            row["name"]
-            for row in conn.execute(
-                "PRAGMA table_info(visitor_logs)"
-            ).fetchall()
-        }
-        existing_users = {
-            row["name"]
-            for row in conn.execute(
-                "PRAGMA table_info(users)"
-            ).fetchall()
-        }
+# ======================================
+# DATABASE CLOSE
+# ======================================
 
-        visitor_new_columns = {
-            "visitor_token": "TEXT",
-            "device_type": "TEXT",
-            "browser": "TEXT",
-            "operating_system": "TEXT",
-            "latitude": "REAL",
-            "longitude": "REAL",
-            "accuracy": "REAL"
-        }
-        users_new_columns = {
-            "shared_id": "TEXT"
-        }
-
-        for column, data_type in visitor_new_columns.items():
-            if column not in existing_visitor_logs:
-                conn.execute(
-                    f"ALTER TABLE visitor_logs "
-                    f"ADD COLUMN {column} {data_type}"
-                )
-        for column ,data_type in users_new_columns.items():
-            if column not in existing_users:
-                conn.execute(
-                    f"ALTER TABLE users "
-                    f"ADD COLUMN {column} {data_type}"
-                )
-         # shared_id ko unique banane ke liye index
-        # conn.execute("""
-        #     CREATE UNIQUE INDEX IF NOT EXISTS
-        #     idx_users_shared_id
-        #     ON users(shared_id)
-        # """)
+def close_database():
+    client.close()

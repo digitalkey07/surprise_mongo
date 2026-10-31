@@ -1,8 +1,7 @@
 
-import json
-from contextlib import closing
-
-from flask import Blueprint, render_template, request, jsonify, abort
+from bson import ObjectId
+from pymongo.errors import PyMongoError
+from flask import Blueprint, render_template, request, jsonify
 
 from database import get_db
 from utils.validator import validate_token
@@ -17,10 +16,11 @@ user_bp = Blueprint("user_dashboard", __name__)
 # ============================================================
 
 def get_current_user():
+
     data = request.get_json(silent=True) or {}
     token = data.get("token")
 
-    if not token:
+    if not isinstance(token, str) or not token:
         return None, (jsonify({
             "status": "error",
             "message": "Login required."
@@ -37,92 +37,147 @@ def get_current_user():
             "message": "Invalid or expired token."
         }), 401)
 
-    user_id = token_data.get("user_id", token_data.get("id"))
+    # Current token format uses user_id
+    user_id = token_data.get("user_id")
 
-    if user_id is None:
+    if not isinstance(user_id, str) or not ObjectId.is_valid(user_id):
         return None, (jsonify({
             "status": "error",
-            "message": "User ID missing from token."
+            "message": "Invalid user ID in token."
         }), 401)
 
-    with closing(get_db()) as conn:
-        row = conn.execute("""
-            SELECT id, username, user_type, shared_id
-            FROM users
-            WHERE id = ?
-        """, (user_id,)).fetchone()
+    try:
+        db = get_db()
 
-    if row is None:
+        user = db.users.find_one(
+            {
+                "_id": ObjectId(user_id),
+                "user_type": {"$ne": USER_TYPE}
+            },
+            {
+                "username": 1,
+                "user_type": 1,
+                "is_verify": 1
+            }
+        )
+
+    except PyMongoError as e:
+        print("User authentication database error:", e)
+
         return None, (jsonify({
             "status": "error",
-            "message": "User not found."
+            "message": "Database error."
+        }), 500)
+
+    if user is None:
+        return None, (jsonify({
+            "status": "error",
+            "message": "User not found or account is not a normal user."
         }), 401)
 
-    user = dict(row)
-
-    if user["user_type"] == USER_TYPE:
+    if not user.get("is_verify", False):
         return None, (jsonify({
             "status": "error",
-            "message": "Normal user account required."
+            "message": "Please verify your account."
         }), 403)
 
-    if not user.get("shared_id"):
-        return None, (jsonify({
-            "status": "error",
-            "message": "Share ID is not configured."
-        }), 409)
+    user["id"] = str(user.pop("_id"))
 
     return user, None
+
+
+# ============================================================
+# SERIALIZE VISITOR DOCUMENT
+# ============================================================
+
+def serialize_visitor(visitor):
+
+    visitor["id"] = str(visitor.pop("_id"))
+
+    # Convert BSON ObjectId to string for JSON response
+    user_id = visitor.get("user_id")
+
+    if isinstance(user_id, ObjectId):
+        visitor["user_id"] = str(user_id)
+
+    return visitor
 
 
 # ============================================================
 # FETCH VISITORS FOR CURRENT USER
 # ============================================================
 
-def fetch_visitors(shared_id, limit=None, search=""):
-    sql = """
-        SELECT
-            id,
-            ip_address,
-            mac_address,
-            page_path,
-            visited_at,
-            device_type,
-            browser,
-            operating_system,
-            latitude,
-            longitude,
-            accuracy,
-            share_id
-        FROM visitor_logs
-        WHERE share_id = ?
-    """
+def fetch_visitors(user_id, limit=None, search=""):
 
-    params = [shared_id]
+    db = get_db()
+
+    query = {
+        "user_id": user_id
+    }
 
     if search:
-        sql += """
-            AND (
-                COALESCE(ip_address, '') LIKE ?
-                OR COALESCE(page_path, '') LIKE ?
-                OR COALESCE(browser, '') LIKE ?
-                OR COALESCE(operating_system, '') LIKE ?
-                OR COALESCE(device_type, '') LIKE ?
-            )
-        """
-        term = f"%{search}%"
-        params.extend([term] * 5)
 
-    sql += " ORDER BY id DESC"
+        safe_search = search
+
+        query["$or"] = [
+            {
+                "ip_address": {
+                    "$regex": safe_search,
+                    "$options": "i"
+                }
+            },
+            {
+                "page_path": {
+                    "$regex": safe_search,
+                    "$options": "i"
+                }
+            },
+            {
+                "browser": {
+                    "$regex": safe_search,
+                    "$options": "i"
+                }
+            },
+            {
+                "operating_system": {
+                    "$regex": safe_search,
+                    "$options": "i"
+                }
+            },
+            {
+                "device_type": {
+                    "$regex": safe_search,
+                    "$options": "i"
+                }
+            }
+        ]
+
+    projection = {
+        "user_id": 1,
+        "ip_address": 1,
+        "mac_address": 1,
+        "page_path": 1,
+        "visited_at": 1,
+        "device_type": 1,
+        "browser": 1,
+        "operating_system": 1,
+        "latitude": 1,
+        "longitude": 1,
+        "accuracy": 1
+    }
+
+    cursor = db.visitor_logs.find(
+        query,
+        projection
+    ).sort("_id", -1)
 
     if limit is not None:
-        sql += " LIMIT ?"
-        params.append(limit)
+        cursor = cursor.limit(limit)
 
-    with closing(get_db()) as conn:
-        rows = conn.execute(sql, params).fetchall()
-
-    return [dict(row) for row in rows]
+    return [
+        serialize_visitor(visitor)
+        for visitor in cursor
+    ]
 
 
 # ============================================================
@@ -131,6 +186,7 @@ def fetch_visitors(shared_id, limit=None, search=""):
 
 @user_bp.route("/dashboard", methods=["GET"])
 def user_dashboard_page():
+
     return render_template("user_dashboard.html")
 
 
@@ -141,6 +197,7 @@ def user_dashboard_page():
 
 @user_bp.route("/user/profile", methods=["POST"])
 def user_profile():
+
     user, error = get_current_user()
 
     if error:
@@ -151,8 +208,7 @@ def user_profile():
         "profile": {
             "id": user["id"],
             "username": user["username"],
-            "user_type": user["user_type"],
-            "shared_id": user["shared_id"]
+            "user_type": user["user_type"]
         }
     }), 200
 
@@ -164,28 +220,39 @@ def user_profile():
 
 @user_bp.route("/user/dashboard", methods=["POST"])
 def user_dashboard_data():
+
     user, error = get_current_user()
 
     if error:
         return error
 
-    with closing(get_db()) as conn:
-        total = conn.execute("""
-            SELECT COUNT(*) AS total
-            FROM visitor_logs
-            WHERE share_id = ?
-        """, (user["shared_id"],)).fetchone()["total"]
+    try:
+        db = get_db()
 
-    recent = fetch_visitors(
-        shared_id=user["shared_id"],
-        limit=5
-    )
+        user_object_id = ObjectId(user["id"])
+
+        total = db.visitor_logs.count_documents({
+            "user_id": user_object_id
+        })
+
+        recent = fetch_visitors(
+            user_id=user_object_id,
+            limit=5
+        )
+
+    except PyMongoError as e:
+        print("Dashboard database error:", e)
+
+        return jsonify({
+            "status": "error",
+            "message": "Unable to load dashboard data."
+        }), 500
 
     return jsonify({
         "status": "success",
         "username": user["username"],
         "user_type": user["user_type"],
-        "share_id": user["shared_id"],
+        "user_id": user["id"],
         "total_visitors": total,
         "recent_visitors": recent
     }), 200
@@ -198,27 +265,46 @@ def user_dashboard_data():
 
 @user_bp.route("/user/festivals", methods=["POST"])
 def user_festivals():
+
     user, error = get_current_user()
 
     if error:
         return error
 
-    with closing(get_db()) as conn:
-        rows = conn.execute("""
-            SELECT
-                id,
-                festival_name,
-                title,
-                subtitle,
-                eyebrow
-            FROM uidata
-            WHERE is_active = 1
-            ORDER BY festival_name COLLATE NOCASE ASC
-        """).fetchall()
+    try:
+        db = get_db()
+
+        cursor = db.uidata.find(
+            {
+                "is_active": 1
+            },
+            {
+                "festival_name": 1,
+                "title": 1,
+                "subtitle": 1,
+                "eyebrow": 1
+            }
+        ).sort("festival_name", 1)
+
+        festivals = []
+
+        for festival in cursor:
+
+            festival["id"] = str(festival.pop("_id"))
+
+            festivals.append(festival)
+
+    except PyMongoError as e:
+        print("Festivals database error:", e)
+
+        return jsonify({
+            "status": "error",
+            "message": "Unable to load festivals."
+        }), 500
 
     return jsonify({
         "status": "success",
-        "festivals": [dict(row) for row in rows]
+        "festivals": festivals
     }), 200
 
 
@@ -229,6 +315,7 @@ def user_festivals():
 
 @user_bp.route("/user/visitors", methods=["POST"])
 def user_visitors_data():
+
     user, error = get_current_user()
 
     if error:
@@ -243,14 +330,22 @@ def user_visitors_data():
             "message": "Invalid search value."
         }), 400
 
-    visitors = fetch_visitors(
-        shared_id=user["shared_id"],
-        search=search.strip()[:100]
-    )
+    try:
+        visitors = fetch_visitors(
+            user_id=ObjectId(user["id"]),
+            search=search.strip()[:100]
+        )
+
+    except PyMongoError as e:
+        print("Visitors database error:", e)
+
+        return jsonify({
+            "status": "error",
+            "message": "Unable to load visitors."
+        }), 500
 
     return jsonify({
         "status": "success",
         "total_visitors": len(visitors),
         "visitors": visitors
     }), 200
-

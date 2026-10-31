@@ -5,8 +5,8 @@ from config import TOKEN_ENCRYPTION_KEY
 
 def create_token(tokenData):
     payload = {
-        "user_id":tokenData["id"],
-        "shared_id":tokenData["shared_id"]
+        "user_id":tokenData["id"]
+        
     }
     payload_byte = json.dumps(payload).encode("utf-8")
     encrypted_token = Fernet(TOKEN_ENCRYPTION_KEY).encrypt(payload_byte)

@@ -51,7 +51,7 @@
                             <div class="stat-number" id="accountType">—</div>
                         </div>
                         <div class="card">
-                            <div class="stat-title">Your Share ID</div>
+                            <div class="stat-title">Your User ID</div>
                             <div class="stat-number" id="shareIdStat">—</div>
                         </div>
                     </div>
@@ -195,6 +195,7 @@
     </div>
 
     <script>
+
         "use strict";
 
         const API = {
@@ -207,13 +208,19 @@
         const token = localStorage.getItem("token");
         const $ = id => document.getElementById(id);
 
+        let currentUserId = "";
         let currentShareUrl = "";
         let selectedFestivalId = "";
-        let currentShareId = "";
         let searchTimer = null;
         let refreshTimer = null;
 
+
+        // ============================================================
+        // HTML ESCAPE
+        // ============================================================
+
         function escapeHTML(value) {
+
             return String(value ?? "").replace(/[&<>"']/g, char => ({
                 "&": "&amp;",
                 "<": "&lt;",
@@ -223,262 +230,540 @@
             })[char]);
         }
 
+
+        // ============================================================
+        // DATE FORMAT
+        // ============================================================
+
         function formatDate(value) {
+
             if (!value) return "—";
+
             const date = new Date(value);
-            return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+
+            return Number.isNaN(date.getTime())
+                ? String(value)
+                : date.toLocaleString();
         }
 
+
+        // ============================================================
+        // API REQUEST
+        // ============================================================
+
         async function apiPost(url, extra = {}) {
+
             if (!token) {
                 window.location.href = "/login";
                 throw new Error("Login required.");
             }
 
             const response = await fetch(url, {
+
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ token, ...extra })
+
+                headers: {
+                    "Content-Type": "application/json"
+                },
+
+                body: JSON.stringify({
+                    token,
+                    ...extra
+                })
+
             });
 
-            const data = await response.json().catch(() => ({}));
+            const contentType =
+                response.headers.get("content-type") || "";
+
+            if (!contentType.includes("application/json")) {
+                throw new Error("Server ne valid JSON response nahi diya.");
+            }
+
+            const data = await response.json();
 
             if (response.status === 401) {
+
                 localStorage.removeItem("token");
+
                 window.location.href = "/login";
+
                 throw new Error("Session expired. Please login again.");
             }
 
             if (!response.ok || data.status !== "success") {
-                throw new Error(data.message || data.error || "Request failed.");
+
+                throw new Error(
+                    data.message || data.error || "Request failed."
+                );
             }
 
             return data;
         }
 
+
+        // ============================================================
+        // STATUS MESSAGE
+        // ============================================================
+
         function showError(message) {
+
             $("globalStatus").textContent = message;
             $("globalStatus").className = "status error";
         }
 
+
         function showSuccess(message) {
+
             $("globalStatus").textContent = message;
             $("globalStatus").className = "status success";
         }
 
+
+        // ============================================================
+        // MAP URL
+        // ============================================================
+
         function mapURL(visitor) {
-            if (visitor.latitude == null || visitor.longitude == null) return "";
+
+            if (
+                visitor.latitude == null ||
+                visitor.longitude == null
+            ) {
+                return "";
+            }
 
             const lat = Number(visitor.latitude);
             const lng = Number(visitor.longitude);
 
-            if (!Number.isFinite(lat) || !Number.isFinite(lng) ||
-                lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+            if (
+                !Number.isFinite(lat) ||
+                !Number.isFinite(lng) ||
+                lat < -90 ||
+                lat > 90 ||
+                lng < -180 ||
+                lng > 180
+            ) {
                 return "";
             }
 
             return `https://www.google.com/maps?q=${lat},${lng}`;
         }
 
+
+        // ============================================================
+        // RENDER RECENT VISITORS
+        // ============================================================
+
         function renderRecent(visitors) {
+
             const tbody = $("recentTable");
 
             if (!visitors.length) {
-                tbody.innerHTML = '<tr><td colspan="5" class="empty">No visitors recorded yet.</td></tr>';
+
+                tbody.innerHTML = `
+            <tr>
+                <td colspan="5" class="empty">
+                    No visitors recorded yet.
+                </td>
+            </tr>
+        `;
+
                 return;
             }
 
             tbody.innerHTML = visitors.map(visitor => {
+
                 const map = mapURL(visitor);
+
                 return `
             <tr>
                 <td>${escapeHTML(visitor.ip_address || "—")}</td>
+
                 <td>${escapeHTML(visitor.device_type || "—")}</td>
+
                 <td>${escapeHTML(visitor.browser || "—")}</td>
-                <td>${map
-                        ? `<a class="map-link" href="${map}" target="_blank" rel="noopener noreferrer">View Map</a>`
-                        : "Unavailable"}</td>
+
+                <td>
+                    ${map
+                        ? `<a class="map-link"
+                              href="${map}"
+                              target="_blank"
+                              rel="noopener noreferrer">View Map</a>`
+                        : "Unavailable"
+                    }
+                </td>
+
                 <td>${escapeHTML(formatDate(visitor.visited_at))}</td>
-            </tr>`;
+            </tr>
+        `;
+
             }).join("");
         }
 
+
+        // ============================================================
+        // LOAD DASHBOARD
+        // ============================================================
+
         async function loadDashboard() {
+
             try {
+
                 const data = await apiPost(API.dashboard);
 
                 $("welcomeName").textContent = data.username || "User";
-                $("topUsername").textContent = data.username || "User";
-                $("totalVisitors").textContent = data.total_visitors ?? 0;
-                $("shareIdStat").textContent = data.share_id || "—";
-                $("accountType").textContent = data.user_type || "User";
 
-                currentShareId = data.share_id || "";
+                $("topUsername").textContent = data.username || "User";
+
+                $("totalVisitors").textContent =
+                    data.total_visitors ?? 0;
+
+                $("shareIdStat").textContent =
+                    data.user_id || "—";
+
+                $("accountType").textContent =
+                    data.user_type || "User";
+
+                // Current MongoDB User ID
+                currentUserId = data.user_id || currentUserId;
+
                 renderRecent(data.recent_visitors || []);
 
-                // Do not overwrite the selected festival link here.
                 updateShareLink();
+
             } catch (error) {
+
                 showError(error.message);
+
             }
         }
 
+
+        // ============================================================
+        // RENDER ALL VISITORS
+        // ============================================================
+
         function renderVisitors(visitors) {
+
             const tbody = $("visitorsTable");
 
             if (!visitors.length) {
-                tbody.innerHTML = '<tr><td colspan="10" class="empty">No visitors found.</td></tr>';
+
+                tbody.innerHTML = `
+            <tr>
+                <td colspan="10" class="empty">
+                    No visitors found.
+                </td>
+            </tr>
+        `;
+
                 return;
             }
 
             tbody.innerHTML = visitors.map(visitor => {
+
                 const map = mapURL(visitor);
+
                 return `
             <tr>
+
                 <td>${escapeHTML(visitor.ip_address || "—")}</td>
+
                 <td>${escapeHTML(visitor.mac_address || "Unavailable")}</td>
+
                 <td>${escapeHTML(visitor.latitude ?? "—")}</td>
+
                 <td>${escapeHTML(visitor.longitude ?? "—")}</td>
-                <td>${map
-                        ? `<a class="map-link" href="${map}" target="_blank" rel="noopener noreferrer">Open Map</a>`
-                        : "Unavailable"}</td>
+
+                <td>
+                    ${map
+                        ? `<a class="map-link"
+                              href="${map}"
+                              target="_blank"
+                              rel="noopener noreferrer">Open Map</a>`
+                        : "Unavailable"
+                    }
+                </td>
+
                 <td>${escapeHTML(visitor.page_path || "—")}</td>
+
                 <td>${escapeHTML(visitor.device_type || "—")}</td>
+
                 <td>${escapeHTML(visitor.browser || "—")}</td>
+
                 <td>${escapeHTML(visitor.operating_system || "—")}</td>
+
                 <td>${escapeHTML(formatDate(visitor.visited_at))}</td>
-            </tr>`;
+
+            </tr>
+        `;
+
             }).join("");
         }
 
+
+        // ============================================================
+        // LOAD VISITORS
+        // ============================================================
+
         async function loadVisitors() {
+
             try {
+
                 const data = await apiPost(API.visitors, {
+
                     search: $("visitorSearch").value.trim()
+
                 });
 
                 renderVisitors(data.visitors || []);
-                $("visitorCount").textContent = `${data.total_visitors ?? 0} result(s)`;
+
+                $("visitorCount").textContent =
+                    `${data.total_visitors ?? 0} result(s)`;
+
             } catch (error) {
-                $("visitorsTable").innerHTML =
-                    `<tr><td colspan="10" class="empty">${escapeHTML(error.message)}</td></tr>`;
+
+                $("visitorsTable").innerHTML = `
+            <tr>
+                <td colspan="10" class="empty">
+                    ${escapeHTML(error.message)}
+                </td>
+            </tr>
+        `;
+
                 showError(error.message);
             }
         }
+
+
+        // ============================================================
+        // LOAD PROFILE
+        // ============================================================
 
         async function loadProfile() {
+
             try {
+
                 const data = await apiPost(API.profile);
+
                 const profile = data.profile || {};
 
-                $("profileId").value = profile.id ?? "";
-                $("profileUsername").value = profile.username ?? "";
-                $("profileType").value = profile.user_type ?? "";
-                $("profileShareId").value = profile.shared_id ?? "";
+                $("profileId").value = profile.id || "";
 
-                $("topUsername").textContent = profile.username || "User";
-                $("welcomeName").textContent = profile.username || "User";
+                $("profileUsername").value = profile.username || "";
 
-                currentShareId = profile.shared_id || currentShareId;
+                $("profileType").value = profile.user_type || "";
+
+                $("profileShareId").value = profile.id || "";
+
+                $("topUsername").textContent =
+                    profile.username || "User";
+
+                $("welcomeName").textContent =
+                    profile.username || "User";
+
+                currentUserId = profile.id || "";
+
                 updateShareLink();
+
             } catch (error) {
+
                 showError(error.message);
+
             }
         }
 
+
+        // ============================================================
+        // LOAD ACTIVE FESTIVALS
+        // ============================================================
+
         async function loadFestivals() {
+
             const select = $("festivalSelect");
 
             try {
+
                 const data = await apiPost(API.festivals);
+
                 const festivals = data.festivals || [];
 
-                select.innerHTML = '<option value="">-- Select a festival --</option>';
+                select.innerHTML = `
+            <option value="">-- Select a festival --</option>
+        `;
 
                 if (!festivals.length) {
-                    select.innerHTML = '<option value="">No active festivals available</option>';
+
+                    select.innerHTML = `
+                <option value="">No active festivals available</option>
+            `;
+
                     updateShareLink();
+
                     return;
                 }
 
                 festivals.forEach(festival => {
+
                     const option = document.createElement("option");
+
                     option.value = String(festival.id);
+
                     option.textContent = festival.festival_name;
+
                     option.dataset.title = festival.title || "";
+
                     option.dataset.subtitle = festival.subtitle || "";
+
                     select.appendChild(option);
+
                 });
 
-                // Restore a selection saved for this browser, if still active.
-                const savedId = localStorage.getItem("selectedFestivalId");
-                if (savedId && festivals.some(f => String(f.id) === savedId)) {
+                // Restore previously selected festival
+                const savedId = localStorage.getItem(
+                    `selectedFestivalId_${currentUserId}`
+                );
+
+                if (
+                    savedId &&
+                    festivals.some(f => String(f.id) === savedId)
+                ) {
+
                     select.value = savedId;
+
                 } else {
+
                     select.selectedIndex = 0;
+
                 }
 
                 updateShareLink();
+
             } catch (error) {
-                select.innerHTML = '<option value="">Could not load festivals</option>';
+
+                select.innerHTML = `
+            <option value="">Could not load festivals</option>
+        `;
+
                 showError(error.message);
+
             }
         }
 
+
+        // ============================================================
+        // GENERATE SHARE LINK
+        // ============================================================
+
         function updateShareLink() {
+
             const select = $("festivalSelect");
+
             selectedFestivalId = select.value || "";
 
             const option = select.selectedOptions[0];
-            $("festivalDescription").textContent = option && option.value
-                ? [option.dataset.title, option.dataset.subtitle].filter(Boolean).join(" — ")
-                : "Select an available festival to create your link.";
 
-            if (selectedFestivalId) {
-                localStorage.setItem("selectedFestivalId", selectedFestivalId);
-            }
+            $("festivalDescription").textContent =
+                option && option.value
+                    ? [
+                        option.dataset.title,
+                        option.dataset.subtitle
+                    ].filter(Boolean).join(" — ")
+                    : "Select an available festival to create your link.";
 
-            if (currentShareId && selectedFestivalId) {
-                currentShareUrl = `${window.location.origin}/share/${encodeURIComponent(currentShareId)}/${encodeURIComponent(selectedFestivalId)}`;
+            if (selectedFestivalId && currentUserId) {
+
+                localStorage.setItem(
+                    `selectedFestivalId_${currentUserId}`,
+                    selectedFestivalId
+                );
+
+                currentShareUrl =
+                    `${window.location.origin}/share/${encodeURIComponent(currentUserId)}/${encodeURIComponent(selectedFestivalId)}`;
+
             } else {
+
                 currentShareUrl = "";
+
             }
 
             $("shareUrl").value = currentShareUrl;
+
             $("profileShareUrl").value = currentShareUrl;
+
             $("copyLinkBtn").disabled = !currentShareUrl;
         }
 
+
+        // ============================================================
+        // COPY SHARE LINK
+        // ============================================================
+
         async function copyShareLink() {
+
             if (!currentShareUrl) {
-                $("copyStatus").textContent = "Please select a festival first.";
+
+                $("copyStatus").textContent =
+                    "Please select a festival first.";
+
                 return;
             }
 
             try {
+
                 await navigator.clipboard.writeText(currentShareUrl);
-                $("copyStatus").textContent = "Share link copied successfully.";
+
+                $("copyStatus").textContent =
+                    "Share link copied successfully.";
+
                 $("copyStatus").className = "status success";
+
             } catch {
+
                 $("shareUrl").focus();
+
                 $("shareUrl").select();
 
                 const copied = document.execCommand("copy");
+
                 $("copyStatus").textContent = copied
                     ? "Share link copied successfully."
                     : "Copy failed. Please copy the URL manually.";
-                $("copyStatus").className = copied ? "status success" : "status error";
+
+                $("copyStatus").className =
+                    copied ? "status success" : "status error";
+
             }
         }
 
-        function switchView(viewName) {
-            document.querySelectorAll(".view").forEach(view => view.classList.remove("active"));
 
-            document.querySelectorAll(".nav-btn[data-view]").forEach(button => {
-                button.classList.toggle("active", button.dataset.view === viewName);
+        // ============================================================
+        // SWITCH DASHBOARD VIEW
+        // ============================================================
+
+        function switchView(viewName) {
+
+            document.querySelectorAll(".view").forEach(view => {
+
+                view.classList.remove("active");
+
             });
 
-            $(`${viewName}View`).classList.add("active");
+            document.querySelectorAll(".nav-btn[data-view]").forEach(button => {
+
+                button.classList.toggle(
+                    "active",
+                    button.dataset.view === viewName
+                );
+
+            });
+
+            const targetView = $(`${viewName}View`);
+
+            if (!targetView) return;
+
+            targetView.classList.add("active");
 
             $("pageTitle").textContent = ({
                 dashboard: "Dashboard",
@@ -487,52 +772,137 @@
             })[viewName] || "Dashboard";
 
             if (viewName === "dashboard") {
+
                 loadDashboard();
+
                 loadFestivals();
+
             }
-            if (viewName === "visitors") loadVisitors();
-            if (viewName === "profile") loadProfile();
+
+            if (viewName === "visitors") {
+
+                loadVisitors();
+
+            }
+
+            if (viewName === "profile") {
+
+                loadProfile();
+
+            }
         }
 
+
+        // ============================================================
+        // EVENT LISTENERS
+        // ============================================================
+
         document.querySelectorAll(".nav-btn[data-view]").forEach(button => {
-            button.addEventListener("click", () => switchView(button.dataset.view));
+
+            button.addEventListener("click", () => {
+
+                switchView(button.dataset.view);
+
+            });
+
         });
 
-        $("festivalSelect").addEventListener("change", updateShareLink);
-        $("copyLinkBtn").addEventListener("click", copyShareLink);
-        $("viewAllBtn").addEventListener("click", () => switchView("visitors"));
-        $("refreshVisitorsBtn").addEventListener("click", loadVisitors);
+
+        $("festivalSelect").addEventListener(
+            "change",
+            updateShareLink
+        );
+
+
+        $("copyLinkBtn").addEventListener(
+            "click",
+            copyShareLink
+        );
+
+
+        $("viewAllBtn").addEventListener(
+            "click",
+            () => switchView("visitors")
+        );
+
+
+        $("refreshVisitorsBtn").addEventListener(
+            "click",
+            loadVisitors
+        );
+
 
         $("visitorSearch").addEventListener("input", () => {
+
             clearTimeout(searchTimer);
-            searchTimer = setTimeout(loadVisitors, 300);
+
+            searchTimer = setTimeout(() => {
+
+                loadVisitors();
+
+            }, 300);
+
         });
+
+
+        // ============================================================
+        // LOGOUT
+        // ============================================================
 
         $("logoutBtn").addEventListener("click", () => {
+
             localStorage.removeItem("token");
-            localStorage.removeItem("selectedFestivalId");
+
             window.location.href = "/login";
+
         });
 
+
+        // ============================================================
+        // INITIALIZE DASHBOARD
+        // ============================================================
+
         async function initialize() {
+
             if (!token) {
+
                 window.location.href = "/login";
+
                 return;
             }
 
             await loadProfile();
+
+            if (!currentUserId) return;
+
             await loadDashboard();
+
             await loadFestivals();
 
+            // Auto refresh every 20 seconds
             refreshTimer = setInterval(() => {
+
                 const activeView = document.querySelector(".view.active");
 
-                if (activeView?.id === "dashboardView") loadDashboard();
-                if (activeView?.id === "visitorsView") loadVisitors();
+                if (activeView?.id === "dashboardView") {
+
+                    loadDashboard();
+
+                }
+
+                if (activeView?.id === "visitorsView") {
+
+                    loadVisitors();
+
+                }
+
             }, 20000);
+
         }
 
+
         initialize();
+
     </script>
 </body>
 

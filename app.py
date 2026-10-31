@@ -1,6 +1,6 @@
 from flask import Flask, render_template, request, jsonify
 from config import SECRET_KEY
-from database import create_table,migrate_database
+from database import init_database
 from werkzeug.middleware.proxy_fix import ProxyFix
 from routers.auth import auth_bp
 from routers.admin import admin_bp
@@ -34,24 +34,7 @@ app.register_blueprint(share_bp)
 @app.route("/")
 def home():
     return render_template("index.html")
-@app.route("/ui/<int:id>", methods=["GET"])
-def get_ui_data(id):
-    with closing(get_db()) as conn:
-        festival = conn.execute("""
-            SELECT *
-            FROM uidata
-            WHERE id = ? AND is_active = 1
-            LIMIT 1
-        """, (id,)).fetchone()
 
-    if festival is None:
-        return {"status": "error", "message": "UI not found"}, 404
-
-    return {
-        "status": "success",
-        **dict(festival)
-    }
-    
 
 
 print("urlMap :", app.url_map, flush=True)
@@ -59,6 +42,5 @@ print("urlMap :", app.url_map, flush=True)
 #MAIN APPLICATION
 #======================================
 if __name__ == "__main__":
-    create_table() 
-    # migrate_database()
+    init_database() 
     app.run(port=5000,host="0.0.0.0", debug=True)

