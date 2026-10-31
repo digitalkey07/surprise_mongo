@@ -129,9 +129,9 @@
                 return;
             }
 
-            // Valid positive integer check
-            if (!/^[1-9]\d*$/.test(ui)) {
-                console.error("Invalid UI ID:", ui);
+            // MongoDB ObjectId validation
+            if (!/^[a-fA-F0-9]{24}$/.test(ui)) {
+                console.error("Invalid MongoDB ObjectId:", ui);
                 return;
             }
 
