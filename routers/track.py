@@ -135,7 +135,7 @@ def track_visitor():
 
     device, browser, os_name = detect_device(ua)
 
-    visited_at = datetime.now(timezone.utc).isoformat()
+    visited_at = datetime.now(timezone.utc)
 
     # ----------------------------------
     # 5. VALIDATE VISITOR ID
@@ -270,7 +270,7 @@ def save_location():
     longitude = data.get("longitude")
     accuracy = data.get("accuracy")
 
-    visited_at = datetime.now(timezone.utc).isoformat()
+    visited_at = datetime.now(timezone.utc)
 
     # ----------------------------------
     # 1. REQUIRED FIELDS

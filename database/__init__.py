@@ -56,7 +56,8 @@ def create_table():
     )
 
     visitor_logs.create_index(
-        [("visited_at", ASCENDING)]
+        [("visited_at", ASCENDING)],
+        expireAfterSeconds=86400
     )
     visitor_logs.create_index(
     [("user_id", ASCENDING)]
